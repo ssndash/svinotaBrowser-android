@@ -482,7 +482,7 @@ fun SettingsScreen(
                 }
                 Spacer(Modifier.height(16.dp))
                 Text("svinotaBrowser", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
-                Text("Version: alpha-4", fontSize = 14.sp, color = Color.Gray)
+                Text("Version: alpha-5", fontSize = 14.sp, color = Color.Gray)
                 Spacer(Modifier.height(8.dp))
                 Text("By SSNDash Team", textAlign = TextAlign.Center, fontSize = 14.sp)
 
