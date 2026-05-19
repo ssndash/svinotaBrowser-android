@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.webkit.CookieManager
 import android.webkit.URLUtil
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
@@ -47,7 +48,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import java.util.Locale
-// Явный импорт ресурсов вашего проекта
 import com.svinota.Browser.R
 
 // Шрифты
@@ -140,6 +140,9 @@ fun SvinotaBrowser(
     val isDark = themeMode >= 2
     val bgColor = MaterialTheme.colorScheme.surface
     val textColor = MaterialTheme.colorScheme.onSurface
+    val errorTitle = t("Error!", "Ошибка!", currentLang)
+    val errorMsg = t("couldn't find this site.", "не смог найти этот сайт.", currentLang)
+    val retryBtn = t("Try again", "Попробовать снова", currentLang)
 
     BackHandler(enabled = true) {
         when {
@@ -160,7 +163,6 @@ fun SvinotaBrowser(
                 inputUrl = ""
             }
             tabs.size > 1 -> {
-                val currentSize = tabs.size
                 tabs = tabs.filter { it.id != activeTabId }
                 activeTabId = tabs.last().id
             }
@@ -225,9 +227,6 @@ fun SvinotaBrowser(
                                         val names = listOf("tvrshk", "KS51", "guganator3000", "Letexe", "michael dodo pizza", "Timofya453")
                                         val bgHex = String.format("#%06X", (0xFFFFFF and bgColor.toArgb()))
                                         val textHex = String.format("#%06X", (0xFFFFFF and textColor.toArgb()))
-                                        val errorTitle = if (currentLang == "ru") "Ошибка!" else "Error!"
-                                        val errorMsg = if (currentLang == "ru") "не смог найти этот сайт." else "couldn't find this site."
-                                        val retryBtn = if (currentLang == "ru") "Попробовать снова" else "Try again"
 
                                         val errorHtml = """
                                             <html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
@@ -263,6 +262,8 @@ fun SvinotaBrowser(
 
                                 settings.javaScriptEnabled = true
                                 settings.domStorageEnabled = true
+                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+
                                 if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
                                     WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, isDark)
                                 }
@@ -456,6 +457,11 @@ fun SettingsScreen(
     onLangChange: (String) -> Unit,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("svinota_prefs", Context.MODE_PRIVATE) }
+    var customSearchUrl by remember { mutableStateOf(prefs.getString("custom_search", "https://") ?: "https://") }
+    var showCustomDialog by remember { mutableStateOf(false) }
+
     val themeLabels = if (currentLang == "ru") listOf("Светлая", "Светлая (Material)", "Тёмная", "Тёмная (Material)") else listOf("Light", "Light (Material)", "Dark", "Dark (Material)")
     val langLabels = mapOf("en" to "English", "ru" to "Русский")
 
@@ -482,7 +488,7 @@ fun SettingsScreen(
                 }
                 Spacer(Modifier.height(16.dp))
                 Text("svinotaBrowser", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
-                Text("Version: alpha-5", fontSize = 14.sp, color = Color.Gray)
+                Text("Version: alpha-6", fontSize = 14.sp, color = Color.Gray)
                 Spacer(Modifier.height(8.dp))
                 Text("By SSNDash Team", textAlign = TextAlign.Center, fontSize = 14.sp)
 
@@ -500,14 +506,29 @@ fun SettingsScreen(
     } else {
         Scaffold(topBar = { TopAppBar(title = { Text(t("Settings", "Настройки", currentLang)) }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null) } }) }) { padding ->
             Column(Modifier.padding(padding).verticalScroll(rememberScrollState())) {
-                Text(t("Search Engine", "Поисковая система", currentLang), Modifier.padding(16.dp), fontWeight = FontWeight.Bold)
-                listOf(
+                Row(Modifier.fillMaxWidth().padding(end = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(t("Search Engine", "Поисковая система", currentLang), Modifier.padding(16.dp), fontWeight = FontWeight.Bold)
+                    IconButton(onClick = { showCustomDialog = true }) { Icon(Icons.Default.Add, null) }
+                }
+
+                val engines = mutableListOf(
                     "DuckDuckGo" to "https://duckduckgo.com/?q=",
                     "Google" to "https://google.com/search?q=",
                     "Yandex" to "https://yandex.ru/search/?text=",
                     "Perplexity" to "https://www.perplexity.ai/?q="
-                ).forEach { (name, url) ->
-                    ListItem(headlineContent = { Text(name) }, leadingContent = { RadioButton(currentSearchEngine == url, onClick = { onSearchEngineChange(url) }) }, modifier = Modifier.clickable { onSearchEngineChange(url) })
+                )
+
+                if (customSearchUrl != "https://" && customSearchUrl.isNotBlank()) {
+                    engines.add("Custom" to customSearchUrl)
+                }
+
+                engines.forEach { (name, url) ->
+                    ListItem(
+                        headlineContent = { Text(name) },
+                        supportingContent = if(name == "Custom") { { Text(url, maxLines = 1) } } else null,
+                        leadingContent = { RadioButton(currentSearchEngine == url, onClick = { onSearchEngineChange(url) }) },
+                        modifier = Modifier.clickable { onSearchEngineChange(url) }
+                    )
                 }
                 HorizontalDivider()
 
@@ -553,5 +574,34 @@ fun SettingsScreen(
                 )
             }
         }
+    }
+
+    if (showCustomDialog) {
+        var tempUrl by remember { mutableStateOf(customSearchUrl) }
+        AlertDialog(
+            onDismissRequest = { showCustomDialog = false },
+            title = { Text(t("Custom Search Engine", "Свой поисковик", currentLang)) },
+            text = {
+                Column {
+                    Text(t("Enter URL with query parameter:", "Введите URL с параметром запроса:", currentLang), fontSize = 12.sp, color = Color.Gray)
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = tempUrl,
+                        onValueChange = { tempUrl = it },
+                        placeholder = { Text("https://example.com/?q=") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    customSearchUrl = tempUrl
+                    prefs.edit().putString("custom_search", tempUrl).apply()
+                    onSearchEngineChange(tempUrl) // Сразу выбираем её
+                    showCustomDialog = false
+                }) { Text("OK") }
+            },
+            dismissButton = { TextButton(onClick = { showCustomDialog = false }) { Text(t("Cancel", "Отмена", currentLang)) } }
+        )
     }
 }
