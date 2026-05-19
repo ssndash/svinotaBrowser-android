@@ -31,8 +31,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
@@ -209,117 +211,156 @@ fun SvinotaBrowser(
                         }
                     }
                 } else {
-                    AndroidView(
-                        factory = { ctx ->
-                            WebView(ctx).apply {
-                                webViewClient = object : WebViewClient() {
-                                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                                        if (url != null && !url.startsWith("data:") && url != "about:blank") {
-                                            activeTab.url.value = url
+                    // Используем стабильный Box для удержания всех запущенных WebView в состоянии разметки
+                    Box(Modifier.fillMaxSize()) {
+                        tabs.forEach { tab ->
+                            val isCurrent = tab.id == activeTabId
+
+                            AndroidView(
+                                factory = { ctx ->
+                                    WebView(ctx).apply {
+                                        webViewClient = object : WebViewClient() {
+                                            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                                if (url != null && !url.startsWith("data:") && url != "about:blank") {
+                                                    tab.url.value = url
+                                                }
+                                            }
+                                            override fun onPageFinished(view: WebView?, url: String?) {
+                                                if (url != null && !url.startsWith("data:") && url != "about:blank") {
+                                                    tab.url.value = url
+                                                }
+                                            }
+                                            override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                                                val names = listOf("tvrshk", "KS51", "guganator3000", "Letexe", "michael dodo pizza", "Timofya453")
+                                                val bgHex = String.format("#%06X", (0xFFFFFF and bgColor.toArgb()))
+                                                val textHex = String.format("#%06X", (0xFFFFFF and textColor.toArgb()))
+
+                                                val errorHtml = """
+                                                    <html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
+                                                        body { background-color: $bgHex; color: $textHex; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; text-align: center; margin: 0; }
+                                                        h1 { color: #0077ff; }
+                                                        button { padding: 12px 24px; border-radius: 20px; border: none; background: #0077ff; color: white; font-weight: bold; margin-top: 20px; }
+                                                    </style></head><body>
+                                                        <h1>$errorTitle</h1>
+                                                        <p>${names.random()} $errorMsg</p>
+                                                        <button onclick="location.reload()">$retryBtn</button>
+                                                    </body></html>
+                                                """.trimIndent()
+                                                view?.loadDataWithBaseURL(null, errorHtml, "text/html", "UTF-8", null)
+                                            }
+                                        }
+
+                                        setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+                                            try {
+                                                val request = DownloadManager.Request(Uri.parse(url))
+                                                val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                                                request.setMimeType(mimetype)
+                                                request.addRequestHeader("cookie", CookieManager.getInstance().getCookie(url))
+                                                request.addRequestHeader("User-Agent", userAgent)
+                                                request.setTitle(fileName)
+                                                request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                                                (ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+                                                Toast.makeText(ctx, "Download started", Toast.LENGTH_SHORT).show()
+                                            } catch (e: Exception) {
+                                                Toast.makeText(ctx, "Download failed", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+
+                                        settings.javaScriptEnabled = true
+                                        settings.domStorageEnabled = true
+                                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+
+                                        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                                            WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, isDark)
+                                        }
+                                        tab.webView = this
+                                        if (tab.url.value.isNotEmpty()) {
+                                            loadUrl(tab.url.value)
                                         }
                                     }
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        if (url != null && !url.startsWith("data:") && url != "about:blank") {
-                                            activeTab.url.value = url
-                                        }
+                                },
+                                update = { webView ->
+                                    if (tab.url.value.isNotEmpty() && webView.url != tab.url.value) {
+                                        webView.loadUrl(tab.url.value)
                                     }
-                                    override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                                        val names = listOf("tvrshk", "KS51", "guganator3000", "Letexe", "michael dodo pizza", "Timofya453")
-                                        val bgHex = String.format("#%06X", (0xFFFFFF and bgColor.toArgb()))
-                                        val textHex = String.format("#%06X", (0xFFFFFF and textColor.toArgb()))
-
-                                        val errorHtml = """
-                                            <html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
-                                                body { background-color: $bgHex; color: $textHex; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; text-align: center; margin: 0; }
-                                                h1 { color: #0077ff; }
-                                                button { padding: 12px 24px; border-radius: 20px; border: none; background: #0077ff; color: white; font-weight: bold; margin-top: 20px; }
-                                            </style></head><body>
-                                                <h1>$errorTitle</h1>
-                                                <p>${names.random()} $errorMsg</p>
-                                                <button onclick="location.reload()">$retryBtn</button>
-                                            </body></html>
-                                        """.trimIndent()
-                                        view?.loadDataWithBaseURL(null, errorHtml, "text/html", "UTF-8", null)
+                                    if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                                        WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDark)
                                     }
-                                }
-
-                                setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
-                                    try {
-                                        val request = DownloadManager.Request(Uri.parse(url))
-                                        val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                                        request.setMimeType(mimetype)
-                                        request.addRequestHeader("cookie", CookieManager.getInstance().getCookie(url))
-                                        request.addRequestHeader("User-Agent", userAgent)
-                                        request.setTitle(fileName)
-                                        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                        request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                                        (ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-                                        Toast.makeText(ctx, "Download started", Toast.LENGTH_SHORT).show()
-                                    } catch (e: Exception) {
-                                        Toast.makeText(ctx, "Download failed", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-
-                                settings.javaScriptEnabled = true
-                                settings.domStorageEnabled = true
-                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-
-                                if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-                                    WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, isDark)
-                                }
-                                activeTab.webView = this
-                                loadUrl(activeTab.url.value)
-                            }
-                        },
-                        update = { webView ->
-                            if (webView.url != activeTab.url.value) {
-                                webView.loadUrl(activeTab.url.value)
-                            }
-                            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-                                WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDark)
-                            }
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                                },
+                                // Решение белого экрана: сохраняем fillMaxSize(), но убираем видимость и кликабельность неактивных вкладок через альфу
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .alpha(if (isCurrent && tab.url.value.isNotEmpty()) 1f else 0f)
+                            )
+                        }
+                    }
                 }
 
-                Surface(
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp).fillMaxWidth().height(64.dp).clip(RoundedCornerShape(28.dp)),
-                    color = MaterialTheme.colorScheme.surfaceVariant, tonalElevation = 8.dp
+                // НИЖНЯЯ ПАНЕЛЬ И ОТДЕЛЬНАЯ КНОПКА МЕНЮ
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(16.dp)
+                        .fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(Modifier.fillMaxSize().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        TextField(
-                            value = inputUrl, onValueChange = { inputUrl = it }, modifier = Modifier.weight(1f),
-                            leadingIcon = { Icon(Icons.Default.Search, null) },
-                            trailingIcon = {
-                                if (activeTab.url.value.isNotEmpty()) {
-                                    IconButton(onClick = { activeTab.webView?.reload() }) {
-                                        Icon(Icons.Default.Refresh, null)
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(64.dp)
+                            .clip(RoundedCornerShape(45.dp)),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = 8.dp
+                    ) {
+                        Row(Modifier.fillMaxSize().padding(start = 8.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            TextField(
+                                value = inputUrl, onValueChange = { inputUrl = it }, modifier = Modifier.weight(1f),
+                                leadingIcon = { Icon(Icons.Default.Search, null) },
+                                trailingIcon = {
+                                    if (activeTab.url.value.isNotEmpty()) {
+                                        IconButton(onClick = { activeTab.webView?.reload() }) {
+                                            Icon(Icons.Default.Refresh, null)
+                                        }
                                     }
+                                },
+                                placeholder = { Text(t("Search...", "Поиск...", currentLang)) },
+                                singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                keyboardActions = KeyboardActions(onSearch = {
+                                    if (inputUrl.isNotBlank()) {
+                                        val trimmed = inputUrl.trim()
+                                        val formatted = if (trimmed.matches("^(https?://)?([\\w-]+\\.)+[\\w-]{2,}(/.*)?$".toRegex()) && !trimmed.contains(" ")) {
+                                            if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
+                                        } else { "$currentSearchEngine$trimmed" }
+                                        activeTab.url.value = formatted
+                                        history = (history + formatted).takeLast(50).distinct()
+                                        dataPrefs.edit().putStringSet("history", history.toSet()).apply()
+                                        focusManager.clearFocus()
+                                    }
+                                }),
+                                colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent)
+                            )
+                            IconButton(onClick = { showTabsSheet = true }) {
+                                Box(Modifier.size(24.dp).border(1.5.dp, MaterialTheme.colorScheme.onSurfaceVariant, RoundedCornerShape(4.dp)), contentAlignment = Alignment.Center) {
+                                    Text(tabs.size.toString(), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                                 }
-                            },
-                            placeholder = { Text(t("Search...", "Поиск...", currentLang)) },
-                            singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                            keyboardActions = KeyboardActions(onSearch = {
-                                if (inputUrl.isNotBlank()) {
-                                    val trimmed = inputUrl.trim()
-                                    val formatted = if (trimmed.matches("^(https?://)?([\\w-]+\\.)+[\\w-]{2,}(/.*)?$".toRegex()) && !trimmed.contains(" ")) {
-                                        if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
-                                    } else { "$currentSearchEngine$trimmed" }
-                                    activeTab.url.value = formatted
-                                    history = (history + formatted).takeLast(50).distinct()
-                                    dataPrefs.edit().putStringSet("history", history.toSet()).apply()
-                                    focusManager.clearFocus()
-                                }
-                            }),
-                            colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent)
-                        )
-                        IconButton(onClick = { showTabsSheet = true }) {
-                            Box(Modifier.size(24.dp).border(1.5.dp, MaterialTheme.colorScheme.onSurfaceVariant, RoundedCornerShape(4.dp)), contentAlignment = Alignment.Center) {
-                                Text(tabs.size.toString(), fontSize = 10.sp, fontWeight = FontWeight.Bold)
                             }
                         }
-                        IconButton(onClick = { showMenuSheet = true }) { Icon(Icons.Default.Menu, null) }
+                    }
+
+                    Spacer(Modifier.width(8.dp))
+
+                    // Круглая обособленная кнопка меню
+                    Surface(
+                        onClick = { showMenuSheet = true },
+                        modifier = Modifier.size(64.dp),
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = 8.dp
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.Menu, null)
+                        }
                     }
                 }
             }
@@ -396,15 +437,94 @@ fun SvinotaBrowser(
     if (showTabsSheet) {
         ModalBottomSheet(onDismissRequest = { showTabsSheet = false }) {
             Column(Modifier.padding(16.dp)) {
-                Button(onClick = {
-                    val n = Tab(); tabs = tabs + n; activeTabId = n.id; showTabsSheet = false
-                }, modifier = Modifier.fillMaxWidth()) { Text(t("+ New Tab", "+ Новая вкладка", currentLang)) }
-                LazyColumn(Modifier.heightIn(max = 400.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = {
+                            val n = Tab(); tabs = tabs + n; activeTabId = n.id; showTabsSheet = false
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(t("+ New Tab", "+ Новая вкладка", currentLang))
+                    }
+
+                    IconButton(
+                        onClick = {
+                            val n = Tab()
+                            tabs = listOf(n)
+                            activeTabId = n.id
+                            showTabsSheet = false
+                        },
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer
+                        ),
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = "Close all tabs")
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.heightIn(max = 400.dp)
+                ) {
                     items(tabs) { t ->
+                        val isCurrentTab = t.id == activeTabId
+                        val siteFavicon = t.webView?.favicon
+
                         ListItem(
-                            modifier = Modifier.clickable { activeTabId = t.id; showTabsSheet = false },
-                            headlineContent = { Text(if(t.url.value.isEmpty()) t("New Tab", "Новая вкладка", currentLang) else t.url.value, maxLines = 1) },
-                            trailingContent = { IconButton(onClick = { if(tabs.size > 1) { tabs = tabs.filter { it.id != t.id }; if(activeTabId == t.id) activeTabId = tabs.last().id } }) { Icon(Icons.Default.Close, null) } }
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(16.dp))
+                                .border(
+                                    width = if (isCurrentTab) 2.dp else 0.dp,
+                                    color = if (isCurrentTab) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                    shape = RoundedCornerShape(16.dp)
+                                )
+                                .clickable { activeTabId = t.id; showTabsSheet = false },
+                            leadingContent = {
+                                if (siteFavicon != null) {
+                                    Image(
+                                        bitmap = siteFavicon.asImageBitmap(),
+                                        contentDescription = "Favicon",
+                                        modifier = Modifier.size(24.dp).clip(RoundedCornerShape(4.dp))
+                                    )
+                                } else {
+                                    Icon(Icons.Default.Menu, null, tint = MaterialTheme.colorScheme.primary)
+                                }
+                            },
+                            headlineContent = {
+                                Text(
+                                    text = if(t.url.value.isEmpty()) t("New Tab", "Новая вкладка", currentLang) else t.url.value.removePrefix("https://").removePrefix("http://").split("/")[0],
+                                    maxLines = 1,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            supportingContent = {
+                                if(t.url.value.isNotEmpty()) {
+                                    Text(t.url.value, maxLines = 1, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                                }
+                            },
+                            trailingContent = {
+                                IconButton(onClick = {
+                                    if(tabs.size > 1) {
+                                        tabs = tabs.filter { it.id != t.id }
+                                        if(activeTabId == t.id) activeTabId = tabs.last().id
+                                    } else {
+                                        t.url.value = ""
+                                    }
+                                }) {
+                                    Icon(Icons.Default.Close, null)
+                                }
+                            },
+                            colors = ListItemDefaults.colors(
+                                containerColor = if (isCurrentTab) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
                         )
                     }
                 }
@@ -488,7 +608,7 @@ fun SettingsScreen(
                 }
                 Spacer(Modifier.height(16.dp))
                 Text("svinotaBrowser", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
-                Text("Version: alpha-6", fontSize = 14.sp, color = Color.Gray)
+                Text("Version: alpha-7", fontSize = 14.sp, color = Color.Gray)
                 Spacer(Modifier.height(8.dp))
                 Text("By SSNDash Team", textAlign = TextAlign.Center, fontSize = 14.sp)
 
@@ -597,7 +717,7 @@ fun SettingsScreen(
                 Button(onClick = {
                     customSearchUrl = tempUrl
                     prefs.edit().putString("custom_search", tempUrl).apply()
-                    onSearchEngineChange(tempUrl) // Сразу выбираем её
+                    onSearchEngineChange(tempUrl)
                     showCustomDialog = false
                 }) { Text("OK") }
             },
