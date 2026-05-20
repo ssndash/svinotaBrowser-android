@@ -3,12 +3,15 @@ package com.svinota.Browser
 import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.URLUtil
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -50,6 +53,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import java.util.Locale
+import org.json.JSONArray
+import org.json.JSONObject
 import com.svinota.Browser.R
 
 // Шрифты
@@ -57,9 +62,10 @@ val LogoFont = FontFamily(Font(R.font.comic_neue_bold, FontWeight.Bold))
 
 // Модель данных вкладки
 data class Tab(
-    val id: Long = System.currentTimeMillis(),
+    val id: Long = System.nanoTime(), // Используем наносекунды, чтобы ID гарантированно не дублировались при быстром создании
     var url: MutableState<String> = mutableStateOf(""),
-    var webView: WebView? = null
+    var webView: WebView? = null,
+    var favicon: MutableState<Bitmap?> = mutableStateOf(null)
 )
 
 @Composable
@@ -121,8 +127,60 @@ fun SvinotaBrowser(
     val focusManager = LocalFocusManager.current
     val dataPrefs = remember { context.getSharedPreferences("browser_data", Context.MODE_PRIVATE) }
 
-    var tabs by remember { mutableStateOf(listOf(Tab(url = mutableStateOf(initialUrl)))) }
-    var activeTabId by remember { mutableLongStateOf(tabs.first().id) }
+    // Надежное восстановление вкладок через JSON (исключает проблему дубликатов Set и ограничения в 2 вкладки)
+    var tabs by remember {
+        mutableStateOf(
+            run {
+                val savedJson = dataPrefs.getString("opened_tabs_json", null)
+                val restoredList = mutableListOf<Tab>()
+                if (!savedJson.isNullOrEmpty()) {
+                    try {
+                        val jsonArray = JSONArray(savedJson)
+                        for (i in 0 until jsonArray.length()) {
+                            val obj = jsonArray.getJSONObject(i)
+                            val id = obj.optLong("id", System.nanoTime() + i)
+                            val url = obj.optString("url", "")
+                            restoredList.add(Tab(id = id, url = mutableStateOf(url)))
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+                if (restoredList.isEmpty()) {
+                    listOf(Tab(url = mutableStateOf(initialUrl)))
+                } else {
+                    restoredList
+                }
+            }
+        )
+    }
+
+    var activeTabId by remember {
+        mutableLongStateOf(
+            dataPrefs.getLong("active_tab_id", tabs.first().id).let { savedId ->
+                if (tabs.any { it.id == savedId }) savedId else tabs.first().id
+            }
+        )
+    }
+
+    // Лямбда сохранения состояния через JSON (сохраняет точное количество, даже если URL одинаковые)
+    val saveTabsState = {
+        try {
+            val jsonArray = JSONArray()
+            tabs.forEach { tab ->
+                val obj = JSONObject()
+                obj.put("id", tab.id)
+                obj.put("url", tab.url.value)
+                jsonArray.put(obj)
+            }
+            dataPrefs.edit()
+                .putString("opened_tabs_json", jsonArray.toString())
+                .putLong("active_tab_id", activeTabId)
+                .apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
 
     var history by remember { mutableStateOf(dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()) }
     var bookmarks by remember { mutableStateOf(dataPrefs.getStringSet("bookmarks", emptySet())?.toList() ?: emptyList()) }
@@ -158,15 +216,24 @@ fun SvinotaBrowser(
                 if (backUrl != null) {
                     activeTab.url.value = backUrl
                     inputUrl = backUrl
+                    saveTabsState()
                 }
             }
             activeTab.url.value.isNotEmpty() -> {
                 activeTab.url.value = ""
                 inputUrl = ""
+                saveTabsState()
             }
             tabs.size > 1 -> {
+                val tabToRemove = activeTab
                 tabs = tabs.filter { it.id != activeTabId }
                 activeTabId = tabs.last().id
+                tabToRemove.webView?.let {
+                    it.loadUrl("about:blank")
+                    it.stopLoading()
+                    it.destroy()
+                }
+                saveTabsState()
             }
             else -> { (context as? ComponentActivity)?.finish() }
         }
@@ -193,25 +260,32 @@ fun SvinotaBrowser(
                             item {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
                                     activeTab.url.value = "https://ssndash.ru"
+                                    saveTabsState()
                                 }) {
-                                    Image(painter = painterResource(id = R.drawable.icon), contentDescription = null, modifier = Modifier.size(56.dp).clip(RoundedCornerShape(12.dp)))
+                                    // Обновленный ресурс иконки ssndash
+                                    Image(painter = painterResource(id = R.drawable.ssndash), contentDescription = null, modifier = Modifier.size(56.dp).clip(RoundedCornerShape(12.dp)))
                                     Text("SSNDash", fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp), maxLines = 1)
                                 }
                             }
-                            items(bookmarks) { url ->
-                                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { activeTab.url.value = url }) {
+                            items(bookmarks) { bookmarkData ->
+                                val parts = bookmarkData.split("|||")
+                                val bName = parts.getOrNull(0) ?: ""
+                                val bUrl = parts.getOrNull(1) ?: bookmarkData
+                                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
+                                    activeTab.url.value = bUrl
+                                    saveTabsState()
+                                }) {
                                     Surface(Modifier.size(56.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
                                         Box(contentAlignment = Alignment.Center) {
                                             Icon(Icons.Filled.Star, null, tint = MaterialTheme.colorScheme.primary)
                                         }
                                     }
-                                    Text(url.removePrefix("https://").removePrefix("http://").split("/")[0], fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp), maxLines = 1)
+                                    Text(bName.ifBlank { bUrl.removePrefix("https://").removePrefix("http://").split("/")[0] }, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp), maxLines = 1)
                                 }
                             }
                         }
                     }
                 } else {
-                    // Используем стабильный Box для удержания всех запущенных WebView в состоянии разметки
                     Box(Modifier.fillMaxSize()) {
                         tabs.forEach { tab ->
                             val isCurrent = tab.id == activeTabId
@@ -220,14 +294,22 @@ fun SvinotaBrowser(
                                 factory = { ctx ->
                                     WebView(ctx).apply {
                                         webViewClient = object : WebViewClient() {
-                                            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                                 if (url != null && !url.startsWith("data:") && url != "about:blank") {
                                                     tab.url.value = url
+                                                    saveTabsState()
                                                 }
                                             }
                                             override fun onPageFinished(view: WebView?, url: String?) {
                                                 if (url != null && !url.startsWith("data:") && url != "about:blank") {
                                                     tab.url.value = url
+                                                    saveTabsState()
+                                                    val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
+                                                    if (!currentHistory.contains(url)) {
+                                                        val updatedHistory = (currentHistory + url).takeLast(50).distinct()
+                                                        history = updatedHistory
+                                                        dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
+                                                    }
                                                 }
                                             }
                                             override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
@@ -247,6 +329,15 @@ fun SvinotaBrowser(
                                                     </body></html>
                                                 """.trimIndent()
                                                 view?.loadDataWithBaseURL(null, errorHtml, "text/html", "UTF-8", null)
+                                            }
+                                        }
+
+                                        webChromeClient = object : WebChromeClient() {
+                                            override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
+                                                super.onReceivedIcon(view, icon)
+                                                if (icon != null) {
+                                                    tab.favicon.value = icon
+                                                }
                                             }
                                         }
 
@@ -287,11 +378,15 @@ fun SvinotaBrowser(
                                     if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
                                         WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDark)
                                     }
+                                    if (isCurrent) {
+                                        webView.requestFocus()
+                                    } else {
+                                        webView.clearFocus()
+                                    }
                                 },
-                                // Решение белого экрана: сохраняем fillMaxSize(), но убираем видимость и кликабельность неактивных вкладок через альфу
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .alpha(if (isCurrent && tab.url.value.isNotEmpty()) 1f else 0f)
+                                    .alpha(if (isCurrent) 1f else 0.01f)
                             )
                         }
                     }
@@ -333,8 +428,11 @@ fun SvinotaBrowser(
                                             if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
                                         } else { "$currentSearchEngine$trimmed" }
                                         activeTab.url.value = formatted
-                                        history = (history + formatted).takeLast(50).distinct()
-                                        dataPrefs.edit().putStringSet("history", history.toSet()).apply()
+                                        saveTabsState()
+                                        val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
+                                        val updatedHistory = (currentHistory + formatted).takeLast(50).distinct()
+                                        history = updatedHistory
+                                        dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
                                         focusManager.clearFocus()
                                     }
                                 }),
@@ -350,7 +448,6 @@ fun SvinotaBrowser(
 
                     Spacer(Modifier.width(8.dp))
 
-                    // Круглая обособленная кнопка меню
                     Surface(
                         onClick = { showMenuSheet = true },
                         modifier = Modifier.size(64.dp),
@@ -369,31 +466,38 @@ fun SvinotaBrowser(
 
     if (showMenuSheet) {
         ModalBottomSheet(onDismissRequest = { showMenuSheet = false; currentMenuPage = "main" }) {
-            Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 32.dp, top = 8.dp)) {
+            Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 32.dp, top = 0.dp)) {
                 when(currentMenuPage) {
                     "main" -> {
-                        Row(Modifier.fillMaxWidth(), Arrangement.SpaceEvenly) {
-                            MenuIconBtn(Icons.Default.List, "History") { currentMenuPage = "history" }
-                            MenuIconBtn(Icons.Default.Star, "Bookmarks") { currentMenuPage = "bookmarks" }
-                            MenuIconBtn(Icons.Default.KeyboardArrowDown, "Downloads") {
-                                context.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
+                        Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(8.dp)) {
+                            Box(modifier = Modifier.weight(1.0f).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                                MenuIconBtn(Icons.Default.List, t("History", "История", currentLang)) { currentMenuPage = "history" }
+                            }
+                            Box(modifier = Modifier.weight(1.0f).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                                MenuIconBtn(Icons.Default.Star, t("Bookmarks", "Закладки", currentLang)) { currentMenuPage = "bookmarks" }
+                            }
+                            Box(modifier = Modifier.weight(1.0f).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                                MenuIconBtn(Icons.Default.KeyboardArrowDown, t("Downloads", "Загрузки", currentLang)) {
+                                    context.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
+                                }
                             }
                         }
-                        Spacer(Modifier.height(24.dp))
+                        Spacer(Modifier.height(8.dp))
                         Surface(onClick = { showMenuSheet = false; showFullSettings = true }, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
                             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Default.Settings, null)
                                 Spacer(Modifier.width(12.dp))
-                                Text("Settings", fontWeight = FontWeight.Bold)
+                                Text(t("Settings", "Настройки", currentLang), fontWeight = FontWeight.Bold)
                             }
                         }
                     }
                     "history" -> {
-                        Text("History", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(8.dp))
+                        Text(t("History", "История", currentLang), fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(8.dp))
                         LazyColumn(Modifier.heightIn(max = 300.dp)) {
                             items(history.reversed()) { url ->
                                 ListItem(headlineContent = { Text(url, maxLines = 1) }, modifier = Modifier.clickable {
                                     activeTab.url.value = url
+                                    saveTabsState()
                                     showMenuSheet = false
                                 })
                             }
@@ -401,30 +505,52 @@ fun SvinotaBrowser(
                     }
                     "bookmarks" -> {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Bookmarks", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(8.dp))
+                            Text(t("Bookmarks", "Закладки", currentLang), fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(8.dp))
                             IconButton(onClick = { showAddBookmarkDialog = true }) { Icon(Icons.Default.Add, null) }
                         }
-                        LazyColumn(Modifier.heightIn(max = 300.dp)) {
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.heightIn(max = 300.dp)
+                        ) {
                             item {
-                                ListItem(headlineContent = { Text("SSNDash") }, supportingContent = { Text("https://ssndash.ru") }, modifier = Modifier.clickable {
-                                    activeTab.url.value = "https://ssndash.ru"
-                                    showMenuSheet = false
-                                })
-                            }
-                            items(bookmarks) { url ->
                                 ListItem(
-                                    headlineContent = { Text(url.removePrefix("https://").removePrefix("http://").split("/")[0], maxLines = 1) },
-                                    supportingContent = { Text(url, maxLines = 1) },
+                                    headlineContent = { Text("SSNDash") },
+                                    supportingContent = { Text("https://ssndash.ru") },
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable {
+                                            activeTab.url.value = "https://ssndash.ru"
+                                            saveTabsState()
+                                            showMenuSheet = false
+                                        },
+                                    colors = ListItemDefaults.colors(
+                                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                                    )
+                                )
+                            }
+                            items(bookmarks) { bookmarkData ->
+                                val parts = bookmarkData.split("|||")
+                                val bName = parts.getOrNull(0) ?: ""
+                                val bUrl = parts.getOrNull(1) ?: bookmarkData
+                                ListItem(
+                                    headlineContent = { Text(bName.ifBlank { bUrl.removePrefix("https://").removePrefix("http://").split("/")[0] }, maxLines = 1) },
+                                    supportingContent = { Text(bUrl, maxLines = 1) },
                                     trailingContent = {
                                         IconButton(onClick = {
-                                            bookmarks = bookmarks - url
+                                            bookmarks = bookmarks - bookmarkData
                                             dataPrefs.edit().putStringSet("bookmarks", bookmarks.toSet()).apply()
                                         }) { Icon(Icons.Default.Delete, null) }
                                     },
-                                    modifier = Modifier.clickable {
-                                        activeTab.url.value = url
-                                        showMenuSheet = false
-                                    }
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .clickable {
+                                            activeTab.url.value = bUrl
+                                            saveTabsState()
+                                            showMenuSheet = false
+                                        },
+                                    colors = ListItemDefaults.colors(
+                                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                                    )
                                 )
                             }
                         }
@@ -436,7 +562,7 @@ fun SvinotaBrowser(
 
     if (showTabsSheet) {
         ModalBottomSheet(onDismissRequest = { showTabsSheet = false }) {
-            Column(Modifier.padding(16.dp)) {
+            Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp, top = 0.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -444,7 +570,11 @@ fun SvinotaBrowser(
                 ) {
                     Button(
                         onClick = {
-                            val n = Tab(); tabs = tabs + n; activeTabId = n.id; showTabsSheet = false
+                            val n = Tab()
+                            tabs = tabs + n
+                            activeTabId = n.id
+                            saveTabsState()
+                            showTabsSheet = false
                         },
                         modifier = Modifier.weight(1f)
                     ) {
@@ -453,9 +583,12 @@ fun SvinotaBrowser(
 
                     IconButton(
                         onClick = {
+                            // Безопасное закрытие всех WebView перед очисткой списка
+                            tabs.forEach { it.webView?.destroy() }
                             val n = Tab()
                             tabs = listOf(n)
                             activeTabId = n.id
+                            saveTabsState()
                             showTabsSheet = false
                         },
                         colors = IconButtonDefaults.iconButtonColors(
@@ -474,9 +607,9 @@ fun SvinotaBrowser(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.heightIn(max = 400.dp)
                 ) {
-                    items(tabs) { t ->
+                    items(tabs, key = { it.id }) { t ->
                         val isCurrentTab = t.id == activeTabId
-                        val siteFavicon = t.webView?.favicon
+                        val siteFavicon = t.favicon.value
 
                         ListItem(
                             modifier = Modifier
@@ -486,7 +619,11 @@ fun SvinotaBrowser(
                                     color = if (isCurrentTab) MaterialTheme.colorScheme.primary else Color.Transparent,
                                     shape = RoundedCornerShape(16.dp)
                                 )
-                                .clickable { activeTabId = t.id; showTabsSheet = false },
+                                .clickable {
+                                    activeTabId = t.id
+                                    saveTabsState()
+                                    showTabsSheet = false
+                                },
                             leadingContent = {
                                 if (siteFavicon != null) {
                                     Image(
@@ -512,12 +649,25 @@ fun SvinotaBrowser(
                             },
                             trailingContent = {
                                 IconButton(onClick = {
-                                    if(tabs.size > 1) {
-                                        tabs = tabs.filter { it.id != t.id }
-                                        if(activeTabId == t.id) activeTabId = tabs.last().id
+                                    val currentTabs = tabs
+                                    if(currentTabs.size > 1) {
+                                        // Безопасный перевод фокуса ДО удаления элемента
+                                        if(activeTabId == t.id) {
+                                            val remaining = currentTabs.filter { it.id != t.id }
+                                            activeTabId = remaining.last().id
+                                        }
+                                        tabs = currentTabs.filter { it.id != t.id }
+                                        t.webView?.let {
+                                            it.loadUrl("about:blank")
+                                            it.stopLoading()
+                                            it.destroy()
+                                        }
                                     } else {
                                         t.url.value = ""
+                                        t.favicon.value = null
+                                        t.webView?.loadUrl("about:blank")
                                     }
+                                    saveTabsState()
                                 }) {
                                     Icon(Icons.Default.Close, null)
                                 }
@@ -546,8 +696,9 @@ fun SvinotaBrowser(
             confirmButton = {
                 Button(onClick = {
                     if (newBookmarkUrl.isNotBlank()) {
-                        val formatted = if (newBookmarkUrl.startsWith("http")) newBookmarkUrl else "https://$newBookmarkUrl"
-                        bookmarks = (bookmarks + formatted).distinct()
+                        val formattedUrl = if (newBookmarkUrl.startsWith("http")) newBookmarkUrl else "https://$newBookmarkUrl"
+                        val compositeValue = "${newBookmarkName.trim()}|||$formattedUrl"
+                        bookmarks = (bookmarks + compositeValue).distinct()
                         dataPrefs.edit().putStringSet("bookmarks", bookmarks.toSet()).apply()
                         newBookmarkName = ""; newBookmarkUrl = ""; showAddBookmarkDialog = false
                     }
@@ -560,9 +711,14 @@ fun SvinotaBrowser(
 
 @Composable
 fun MenuIconBtn(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { onClick() }.padding(8.dp)) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier.clickable { onClick() }.padding(12.dp).fillMaxWidth()
+    ) {
         Icon(icon, null)
-        Text(label, fontSize = 12.sp)
+        Spacer(Modifier.height(4.dp))
+        Text(label, fontSize = 12.sp, textAlign = TextAlign.Center)
     }
 }
 
@@ -590,33 +746,34 @@ fun SettingsScreen(
     var showAboutPage by remember { mutableStateOf(false) }
 
     if (showAboutPage) {
-        Scaffold(topBar = { TopAppBar(title = { Text("About") }, navigationIcon = { IconButton(onClick = { showAboutPage = false }) { Icon(Icons.Default.ArrowBack, null) } }) }) { padding ->
+        Scaffold(topBar = { TopAppBar(title = { Text(t("About", "О программе", currentLang)) }, navigationIcon = { IconButton(onClick = { showAboutPage = false }) { Icon(Icons.Default.ArrowBack, null) } }) }) { padding ->
             Column(
                 modifier = Modifier.padding(padding).fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier.size(80.dp)
-                ) {
-                    Image(
-                        painter = painterResource(id = R.drawable.icon),
-                        contentDescription = null,
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
+                Image(
+                    painter = painterResource(id = R.drawable.icon),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(80.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                )
                 Spacer(Modifier.height(16.dp))
-                Text("svinotaBrowser", fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
-                Text("Version: alpha-7", fontSize = 14.sp, color = Color.Gray)
+                Text("svinotaBrowser", fontSize = 24.sp, fontFamily = LogoFont)
+                // Обновлено до версии alpha-8
+                Text("Version: alpha-8", fontSize = 14.sp, color = Color.Gray)
                 Spacer(Modifier.height(8.dp))
-                Text("By SSNDash Team", textAlign = TextAlign.Center, fontSize = 14.sp)
+                Text(t("By SSNDash Team", "Разработчик: SSNDash Team", currentLang), textAlign = TextAlign.Center, fontSize = 14.sp)
 
                 Spacer(Modifier.height(32.dp))
-                Text("License", fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start))
+                Text(t("License", "Лицензия", currentLang), fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start))
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License version 3.0 or any later version, published by the Free Software Foundation.",
+                    t(
+                        "This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License version 3.0 or any later version, published by the Free Software Foundation.",
+                        "Это свободное программное обеспечение: вы можете распространять и/или изменять его в соответствии с условиями Стандартной общественной лицензии GNU Affero версии 3.0 или более поздней версии, опубликованной Фондом свободного программного обеспечения.",
+                        currentLang
+                    ),
                     fontSize = 12.sp,
                     color = Color.Gray,
                     textAlign = TextAlign.Start
@@ -688,7 +845,7 @@ fun SettingsScreen(
                 HorizontalDivider(Modifier.padding(vertical = 16.dp))
 
                 ListItem(
-                    headlineContent = { Text("About") },
+                    headlineContent = { Text(t("About", "О программе", currentLang)) },
                     leadingContent = { Icon(Icons.Default.Info, null) },
                     modifier = Modifier.clickable { showAboutPage = true }
                 )
