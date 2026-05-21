@@ -1,13 +1,16 @@
 package com.svinota.Browser
 
+import android.app.Activity
 import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.util.Base64
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.URLUtil
@@ -18,7 +21,11 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -35,34 +42,41 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
+import java.io.ByteArrayOutputStream
 import java.util.Locale
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import com.svinota.Browser.R
 
-// Шрифты
 val LogoFont = FontFamily(Font(R.font.comic_neue_bold, FontWeight.Bold))
 
-// Модель данных вкладки
 data class Tab(
-    val id: Long = System.nanoTime(), // Используем наносекунды, чтобы ID гарантированно не дублировались при быстром создании
+    val id: Long = System.nanoTime(),
     var url: MutableState<String> = mutableStateOf(""),
     var webView: WebView? = null,
     var favicon: MutableState<Bitmap?> = mutableStateOf(null)
@@ -91,10 +105,28 @@ class MainActivity : ComponentActivity() {
             val isDark = themeMode >= 2
 
             val colorScheme = when {
+                themeMode == 4 -> darkColorScheme(
+                    primary = Color(0xFF0076FF),
+                    background = Color.Black,
+                    surface = Color.Black,
+                    surfaceVariant = Color(0xFF121212),
+                    onBackground = Color.White,
+                    onSurface = Color.White,
+                    onSurfaceVariant = Color(0xFFE0E0E0)
+                )
                 useDynamicColors && isDark -> dynamicDarkColorScheme(context)
                 useDynamicColors && !isDark -> dynamicLightColorScheme(context)
                 isDark -> darkColorScheme()
                 else -> lightColorScheme()
+            }
+
+            val view = LocalView.current
+            if (!view.isInEditMode) {
+                SideEffect {
+                    val window = (context as Activity).window
+                    window.statusBarColor = colorScheme.surface.toArgb()
+                    WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !isDark
+                }
             }
 
             MaterialTheme(colorScheme = colorScheme) {
@@ -127,7 +159,50 @@ fun SvinotaBrowser(
     val focusManager = LocalFocusManager.current
     val dataPrefs = remember { context.getSharedPreferences("browser_data", Context.MODE_PRIVATE) }
 
-    // Надежное восстановление вкладок через JSON (исключает проблему дубликатов Set и ограничения в 2 вкладки)
+    var wallpaperType by remember { mutableStateOf(dataPrefs.getString("wp_type", "default") ?: "default") }
+    var wallpaperColor by remember { mutableIntStateOf(dataPrefs.getInt("wp_color", Color.Gray.toArgb())) }
+    var wallpaperBase64 by remember { mutableStateOf(dataPrefs.getString("wp_base64", null)) }
+    var showBookmarksHome by remember { mutableStateOf(dataPrefs.getBoolean("show_bookmarks_home", true)) }
+
+    val wallpaperBitmap = remember(wallpaperBase64) {
+        wallpaperBase64?.let {
+            try {
+                val decodedBytes = Base64.decode(it, Base64.DEFAULT)
+                BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
+            } catch (e: Exception) { null }
+        }
+    }
+
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    var showColorPickerDialog by remember { mutableStateOf(false) }
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                    val bitmap = BitmapFactory.decodeStream(inputStream)
+                    if (bitmap != null) {
+                        val outputStream = ByteArrayOutputStream()
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 85, outputStream)
+                        val base64String = Base64.encodeToString(outputStream.toByteArray(), Base64.DEFAULT)
+
+                        wallpaperBase64 = base64String
+                        wallpaperType = "image"
+                        dataPrefs.edit()
+                            .putString("wp_type", "image")
+                            .putString("wp_base64", base64String)
+                            .apply()
+                    }
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Error loading image", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     var tabs by remember {
         mutableStateOf(
             run {
@@ -163,7 +238,6 @@ fun SvinotaBrowser(
         )
     }
 
-    // Лямбда сохранения состояния через JSON (сохраняет точное количество, даже если URL одинаковые)
     val saveTabsState = {
         try {
             val jsonArray = JSONArray()
@@ -206,6 +280,7 @@ fun SvinotaBrowser(
 
     BackHandler(enabled = true) {
         when {
+            drawerState.isOpen -> { scope.launch { drawerState.close() } }
             currentMenuPage != "main" -> currentMenuPage = "main"
             showFullSettings -> showFullSettings = false
             showMenuSheet -> showMenuSheet = false
@@ -239,229 +314,460 @@ fun SvinotaBrowser(
         }
     }
 
-    if (showFullSettings) {
-        SettingsScreen(themeMode, currentSearchEngine, currentLang, onThemeChange, onSearchEngineChange, onLangChange) { showFullSettings = false }
-    } else {
-        Scaffold { padding ->
-            Box(Modifier.padding(padding).fillMaxSize()) {
-                if (activeTab.url.value.isEmpty()) {
-                    Column(Modifier.fillMaxSize().padding(24.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Image(painter = painterResource(id = R.drawable.icon), contentDescription = null, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(12.dp)))
-                            Spacer(Modifier.width(12.dp))
-                            Text("svinotaBrowser", fontSize = 28.sp, fontFamily = LogoFont)
-                        }
-                        Spacer(Modifier.height(40.dp))
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(4),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            item {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
-                                    activeTab.url.value = "https://ssndash.ru"
-                                    saveTabsState()
-                                }) {
-                                    // Обновленный ресурс иконки ssndash
-                                    Image(painter = painterResource(id = R.drawable.ssndash), contentDescription = null, modifier = Modifier.size(56.dp).clip(RoundedCornerShape(12.dp)))
-                                    Text("SSNDash", fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp), maxLines = 1)
-                                }
-                            }
-                            items(bookmarks) { bookmarkData ->
-                                val parts = bookmarkData.split("|||")
-                                val bName = parts.getOrNull(0) ?: ""
-                                val bUrl = parts.getOrNull(1) ?: bookmarkData
-                                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
-                                    activeTab.url.value = bUrl
-                                    saveTabsState()
-                                }) {
-                                    Surface(Modifier.size(56.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Icon(Icons.Filled.Star, null, tint = MaterialTheme.colorScheme.primary)
-                                        }
-                                    }
-                                    Text(bName.ifBlank { bUrl.removePrefix("https://").removePrefix("http://").split("/")[0] }, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp), maxLines = 1)
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    Box(Modifier.fillMaxSize()) {
-                        tabs.forEach { tab ->
-                            val isCurrent = tab.id == activeTabId
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
+                ModalDrawerSheet(
+                    drawerShape = RoundedCornerShape(topStart = 0.dp, bottomStart = 16.dp, topEnd = 0.dp, bottomEnd = 0.dp),
+                    modifier = Modifier.width(300.dp).fillMaxHeight(),
+                    drawerContainerColor = MaterialTheme.colorScheme.surface
+                ) {
+                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                        Column(Modifier.padding(20.dp).verticalScroll(rememberScrollState())) {
+                            Text(t("Wallpaper Settings", "Настройки обоев", currentLang), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(24.dp))
 
-                            AndroidView(
-                                factory = { ctx ->
-                                    WebView(ctx).apply {
-                                        webViewClient = object : WebViewClient() {
-                                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                                if (url != null && !url.startsWith("data:") && url != "about:blank") {
-                                                    tab.url.value = url
-                                                    saveTabsState()
-                                                }
-                                            }
-                                            override fun onPageFinished(view: WebView?, url: String?) {
-                                                if (url != null && !url.startsWith("data:") && url != "about:blank") {
-                                                    tab.url.value = url
-                                                    saveTabsState()
-                                                    val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
-                                                    if (!currentHistory.contains(url)) {
-                                                        val updatedHistory = (currentHistory + url).takeLast(50).distinct()
-                                                        history = updatedHistory
-                                                        dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
+                            val isDefaultSelected = wallpaperType == "default"
+                            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                                Surface(
+                                    onClick = {
+                                        wallpaperType = "default"
+                                        dataPrefs.edit().putString("wp_type", "default").apply()
+                                    },
+                                    modifier = Modifier.fillMaxWidth().height(80.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    border = if (isDefaultSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(t("System Default", "По умолчанию", currentLang), fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 4.dp))
+                            }
+
+                            val isColorSelected = wallpaperType == "color"
+                            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                                Surface(
+                                    onClick = { showColorPickerDialog = true },
+                                    modifier = Modifier.fillMaxWidth().height(80.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    border = if (isColorSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .clip(CircleShape)
+                                                .then(
+                                                    if (isColorSelected) {
+                                                        Modifier.background(Color(wallpaperColor)).border(1.5.dp, MaterialTheme.colorScheme.onSurface, CircleShape)
+                                                    } else {
+                                                        Modifier.background(Brush.linearGradient(listOf(Color.Red, Color.Green, Color.Blue)))
                                                     }
-                                                }
-                                            }
-                                            override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                                                val names = listOf("tvrshk", "KS51", "guganator3000", "Letexe", "michael dodo pizza", "Timofya453")
-                                                val bgHex = String.format("#%06X", (0xFFFFFF and bgColor.toArgb()))
-                                                val textHex = String.format("#%06X", (0xFFFFFF and textColor.toArgb()))
+                                                )
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(t("Color Palette", "Цветные обои", currentLang), fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 4.dp))
+                            }
 
-                                                val errorHtml = """
-                                                    <html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
-                                                        body { background-color: $bgHex; color: $textHex; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; text-align: center; margin: 0; }
-                                                        h1 { color: #0077ff; }
-                                                        button { padding: 12px 24px; border-radius: 20px; border: none; background: #0077ff; color: white; font-weight: bold; margin-top: 20px; }
-                                                    </style></head><body>
-                                                        <h1>$errorTitle</h1>
-                                                        <p>${names.random()} $errorMsg</p>
-                                                        <button onclick="location.reload()">$retryBtn</button>
-                                                    </body></html>
-                                                """.trimIndent()
-                                                view?.loadDataWithBaseURL(null, errorHtml, "text/html", "UTF-8", null)
-                                            }
-                                        }
-
-                                        webChromeClient = object : WebChromeClient() {
-                                            override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
-                                                super.onReceivedIcon(view, icon)
-                                                if (icon != null) {
-                                                    tab.favicon.value = icon
-                                                }
-                                            }
-                                        }
-
-                                        setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
-                                            try {
-                                                val request = DownloadManager.Request(Uri.parse(url))
-                                                val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                                                request.setMimeType(mimetype)
-                                                request.addRequestHeader("cookie", CookieManager.getInstance().getCookie(url))
-                                                request.addRequestHeader("User-Agent", userAgent)
-                                                request.setTitle(fileName)
-                                                request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                                                (ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-                                                Toast.makeText(ctx, "Download started", Toast.LENGTH_SHORT).show()
-                                            } catch (e: Exception) {
-                                                Toast.makeText(ctx, "Download failed", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-
-                                        settings.javaScriptEnabled = true
-                                        settings.domStorageEnabled = true
-                                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-
-                                        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-                                            WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, isDark)
-                                        }
-                                        tab.webView = this
-                                        if (tab.url.value.isNotEmpty()) {
-                                            loadUrl(tab.url.value)
+                            val isImageSelected = wallpaperType == "image"
+                            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                                Surface(
+                                    onClick = { imagePickerLauncher.launch("image/*") },
+                                    modifier = Modifier.fillMaxWidth().height(100.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    border = if (isImageSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        if (isImageSelected && wallpaperBitmap != null) {
+                                            Image(
+                                                bitmap = wallpaperBitmap.asImageBitmap(),
+                                                contentDescription = null,
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .blur(8.dp),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.15f)))
+                                            Icon(Icons.Default.Check, null, tint = Color.White)
+                                        } else {
+                                            Icon(Icons.Default.Add, null)
                                         }
                                     }
-                                },
-                                update = { webView ->
-                                    if (tab.url.value.isNotEmpty() && webView.url != tab.url.value) {
-                                        webView.loadUrl(tab.url.value)
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(t("Choose from Gallery", "Выбрать из галереи", currentLang), fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 4.dp))
+                            }
+
+                            HorizontalDivider(Modifier.padding(vertical = 12.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(t("Show Bookmarks", "Показывать закладки", currentLang), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Switch(
+                                    checked = showBookmarksHome,
+                                    onCheckedChange = { checked ->
+                                        showBookmarksHome = checked
+                                        dataPrefs.edit().putBoolean("show_bookmarks_home", checked).apply()
                                     }
-                                    if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-                                        WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDark)
-                                    }
-                                    if (isCurrent) {
-                                        webView.requestFocus()
-                                    } else {
-                                        webView.clearFocus()
-                                    }
-                                },
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .alpha(if (isCurrent) 1f else 0.01f)
-                            )
+                                )
+                            }
                         }
                     }
                 }
-
-                // НИЖНЯЯ ПАНЕЛЬ И ОТДЕЛЬНАЯ КНОПКА МЕНЮ
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(16.dp)
-                        .fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(64.dp)
-                            .clip(RoundedCornerShape(45.dp)),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        tonalElevation = 8.dp
+            }
+        ) {
+            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                Scaffold { padding ->
+                    Box(
+                        Modifier
+                            .padding(padding)
+                            .fillMaxSize()
+                            .background(
+                                if (activeTab.url.value.isEmpty()) {
+                                    when (wallpaperType) {
+                                        "color" -> Color(wallpaperColor)
+                                        "image" -> Color.Transparent
+                                        else -> MaterialTheme.colorScheme.surface
+                                    }
+                                } else {
+                                    MaterialTheme.colorScheme.surface
+                                }
+                            )
                     ) {
-                        Row(Modifier.fillMaxSize().padding(start = 8.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            TextField(
-                                value = inputUrl, onValueChange = { inputUrl = it }, modifier = Modifier.weight(1f),
-                                leadingIcon = { Icon(Icons.Default.Search, null) },
-                                trailingIcon = {
-                                    if (activeTab.url.value.isNotEmpty()) {
-                                        IconButton(onClick = { activeTab.webView?.reload() }) {
-                                            Icon(Icons.Default.Refresh, null)
+                        if (activeTab.url.value.isEmpty() && wallpaperType == "image" && wallpaperBitmap != null) {
+                            Image(
+                                bitmap = wallpaperBitmap.asImageBitmap(),
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+
+                        if (activeTab.url.value.isEmpty()) {
+                            Column(Modifier.fillMaxSize().padding(24.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Image(painter = painterResource(id = R.drawable.icon), contentDescription = null, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(12.dp)))
+                                        Spacer(Modifier.width(12.dp))
+                                        Text(
+                                            "svinotaBrowser",
+                                            fontSize = 28.sp,
+                                            fontFamily = LogoFont,
+                                            color = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = { scope.launch { drawerState.open() } },
+                                        colors = IconButtonDefaults.iconButtonColors(
+                                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.0f),
+                                            contentColor = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.primary
+                                        )
+                                    ) {
+                                        Icon(Icons.Default.Edit, contentDescription = "Wallpaper settings")
+                                    }
+                                }
+                                Spacer(Modifier.height(40.dp))
+
+                                if (showBookmarksHome) {
+                                    LazyVerticalGrid(
+                                        columns = GridCells.Fixed(4),
+                                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                                    ) {
+                                        item {
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
+                                                activeTab.url.value = "https://ssndash.ru"
+                                                saveTabsState()
+                                            }) {
+                                                Image(painter = painterResource(id = R.drawable.ssndash), contentDescription = null, modifier = Modifier.size(56.dp).clip(RoundedCornerShape(12.dp)))
+                                                Text(
+                                                    "SSNDash",
+                                                    fontSize = 11.sp,
+                                                    modifier = Modifier.padding(top = 4.dp),
+                                                    maxLines = 1,
+                                                    color = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.onSurface
+                                                )
+                                            }
+                                        }
+                                        items(bookmarks) { bookmarkData ->
+                                            val parts = bookmarkData.split("|||")
+                                            val bName = parts.getOrNull(0) ?: ""
+                                            val bUrl = parts.getOrNull(1) ?: bookmarkData
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
+                                                activeTab.url.value = bUrl
+                                                saveTabsState()
+                                            }) {
+                                                Surface(Modifier.size(56.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                                                    Box(contentAlignment = Alignment.Center) {
+                                                        Icon(Icons.Filled.Star, null, tint = MaterialTheme.colorScheme.primary)
+                                                    }
+                                                }
+                                                Text(
+                                                    bName.ifBlank { bUrl.removePrefix("https://").removePrefix("http://").split("/")[0] },
+                                                    fontSize = 11.sp,
+                                                    modifier = Modifier.padding(top = 4.dp),
+                                                    maxLines = 1,
+                                                    color = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.onSurface
+                                                )
+                                            }
                                         }
                                     }
-                                },
-                                placeholder = { Text(t("Search...", "Поиск...", currentLang)) },
-                                singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                keyboardActions = KeyboardActions(onSearch = {
-                                    if (inputUrl.isNotBlank()) {
-                                        val trimmed = inputUrl.trim()
-                                        val formatted = if (trimmed.matches("^(https?://)?([\\w-]+\\.)+[\\w-]{2,}(/.*)?$".toRegex()) && !trimmed.contains(" ")) {
-                                            if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
-                                        } else { "$currentSearchEngine$trimmed" }
-                                        activeTab.url.value = formatted
-                                        saveTabsState()
-                                        val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
-                                        val updatedHistory = (currentHistory + formatted).takeLast(50).distinct()
-                                        history = updatedHistory
-                                        dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
-                                        focusManager.clearFocus()
-                                    }
-                                }),
-                                colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent)
-                            )
-                            IconButton(onClick = { showTabsSheet = true }) {
-                                Box(Modifier.size(24.dp).border(1.5.dp, MaterialTheme.colorScheme.onSurfaceVariant, RoundedCornerShape(4.dp)), contentAlignment = Alignment.Center) {
-                                    Text(tabs.size.toString(), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        } else {
+                            Box(Modifier.fillMaxSize()) {
+                                tabs.forEach { tab ->
+                                    val isCurrent = tab.id == activeTabId
+
+                                    AndroidView(
+                                        factory = { ctx ->
+                                            WebView(ctx).apply {
+                                                webViewClient = object : WebViewClient() {
+                                                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                                        if (url != null && !url.startsWith("data:") && url != "about:blank") {
+                                                            tab.url.value = url
+                                                            saveTabsState()
+                                                        }
+                                                    }
+                                                    override fun onPageFinished(view: WebView?, url: String?) {
+                                                        if (url != null && !url.startsWith("data:") && url != "about:blank") {
+                                                            tab.url.value = url
+                                                            saveTabsState()
+                                                            val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
+                                                            if (!currentHistory.contains(url)) {
+                                                                val updatedHistory = (currentHistory + url).takeLast(50).distinct()
+                                                                history = updatedHistory
+                                                                dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
+                                                            }
+                                                        }
+                                                    }
+                                                    override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                                                        val names = listOf("tvrshk", "KS51", "guganator3000", "Letexe", "michael dodo pizza", "Timofya453")
+                                                        val bgHex = String.format("#%06X", (0xFFFFFF and bgColor.toArgb()))
+                                                        val textHex = String.format("#%06X", (0xFFFFFF and textColor.toArgb()))
+
+                                                        val errorHtml = """
+                                                            <html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
+                                                                body { background-color: $bgHex; color: $textHex; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; text-align: center; margin: 0; }
+                                                                h1 { color: #0077ff; }
+                                                                button { padding: 12px 24px; border-radius: 20px; border: none; background: #0077ff; color: white; font-weight: bold; margin-top: 20px; }
+                                                            </style></head><body>
+                                                                <h1>$errorTitle</h1>
+                                                                <p>${names.random()} $errorMsg</p>
+                                                                <button onclick="location.reload()">$retryBtn</button>
+                                                            </body></html>
+                                                        """.trimIndent()
+                                                        view?.loadDataWithBaseURL(null, errorHtml, "text/html", "UTF-8", null)
+                                                    }
+                                                }
+
+                                                webChromeClient = object : WebChromeClient() {
+                                                    override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
+                                                        super.onReceivedIcon(view, icon)
+                                                        if (icon != null) {
+                                                            tab.favicon.value = icon
+                                                        }
+                                                    }
+                                                }
+
+                                                setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+                                                    try {
+                                                        val request = DownloadManager.Request(Uri.parse(url))
+                                                        val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                                                        request.setMimeType(mimetype)
+                                                        request.addRequestHeader("cookie", CookieManager.getInstance().getCookie(url))
+                                                        request.addRequestHeader("User-Agent", userAgent)
+                                                        request.setTitle(fileName)
+                                                        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                                        request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                                                        (ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+                                                        Toast.makeText(ctx, "Download started", Toast.LENGTH_SHORT).show()
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(ctx, "Download failed", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+
+                                                settings.javaScriptEnabled = true
+                                                settings.domStorageEnabled = true
+                                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+
+                                                if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                                                    WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, isDark)
+                                                }
+                                                tab.webView = this
+                                                if (tab.url.value.isNotEmpty()) {
+                                                    loadUrl(tab.url.value)
+                                                }
+                                            }
+                                        },
+                                        update = { webView ->
+                                            if (tab.url.value.isNotEmpty() && webView.url != tab.url.value) {
+                                                webView.loadUrl(tab.url.value)
+                                            }
+                                            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                                                WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDark)
+                                            }
+                                            if (isCurrent) {
+                                                webView.requestFocus()
+                                            } else {
+                                                webView.clearFocus()
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .alpha(if (isCurrent) 1f else 0.01f)
+                                    )
                                 }
                             }
                         }
-                    }
 
-                    Spacer(Modifier.width(8.dp))
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(64.dp)
+                                    .clip(RoundedCornerShape(45.dp)),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                tonalElevation = 8.dp
+                            ) {
+                                Row(Modifier.fillMaxSize().padding(start = 8.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    TextField(
+                                        value = inputUrl, onValueChange = { inputUrl = it }, modifier = Modifier.weight(1f),
+                                        leadingIcon = { Icon(Icons.Default.Search, null) },
+                                        trailingIcon = {
+                                            if (activeTab.url.value.isNotEmpty()) {
+                                                IconButton(onClick = { activeTab.webView?.reload() }) {
+                                                    Icon(Icons.Default.Refresh, null)
+                                                }
+                                            }
+                                        },
+                                        placeholder = { Text(t("Search...", "Поиск...", currentLang)) },
+                                        singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                        keyboardActions = KeyboardActions(onSearch = {
+                                            if (inputUrl.isNotBlank()) {
+                                                val trimmed = inputUrl.trim()
+                                                val formatted = if (trimmed.matches("^(https?://)?([\\w-]+\\.)+[\\w-]{2,}(/.*)?$".toRegex()) && !trimmed.contains(" ")) {
+                                                    if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
+                                                } else { "$currentSearchEngine$trimmed" }
+                                                activeTab.url.value = formatted
+                                                saveTabsState()
+                                                val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
+                                                val updatedHistory = (currentHistory + formatted).takeLast(50).distinct()
+                                                history = updatedHistory
+                                                dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
+                                                focusManager.clearFocus()
+                                            }
+                                        }),
+                                        colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent)
+                                    )
+                                    IconButton(onClick = { showTabsSheet = true }) {
+                                        Box(Modifier.size(24.dp).border(1.5.dp, MaterialTheme.colorScheme.onSurfaceVariant, RoundedCornerShape(4.dp)), contentAlignment = Alignment.Center) {
+                                            Text(tabs.size.toString(), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
 
-                    Surface(
-                        onClick = { showMenuSheet = true },
-                        modifier = Modifier.size(64.dp),
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        tonalElevation = 8.dp
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(Icons.Default.Menu, null)
+                            Spacer(Modifier.width(8.dp))
+
+                            Surface(
+                                onClick = { showMenuSheet = true },
+                                modifier = Modifier.size(64.dp),
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                tonalElevation = 8.dp
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Default.Menu, null)
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    AnimatedVisibility(
+        visible = showFullSettings,
+        enter = slideInHorizontally(animationSpec = tween(300), initialOffsetX = { it }),
+        exit = slideOutHorizontally(animationSpec = tween(300), targetOffsetX = { it })
+    ) {
+        SettingsScreen(
+            themeMode = themeMode,
+            currentSearchEngine = currentSearchEngine,
+            currentLang = currentLang,
+            onThemeChange = onThemeChange,
+            onSearchEngineChange = onSearchEngineChange,
+            onLangChange = onLangChange
+        ) { showFullSettings = false }
+    }
+
+    if (showColorPickerDialog) {
+        val colorsPreset = listOf(
+            Color(0xFFF44336), Color(0xFFE91E63), Color(0xFF9C27B0), Color(0xFF673AB7),
+            Color(0xFF3F51B5), Color(0xFF2196F3), Color(0xFF00BCD4), Color(0xFF009688),
+            Color(0xFF4CAF50), Color(0xFF8BC34A), Color(0xFFCDDC39), Color(0xFFFFEB3B),
+            Color(0xFFFFC107), Color(0xFFFF9800), Color(0xFFFF5722), Color(0xFF607D8B)
+        )
+
+        AlertDialog(
+            onDismissRequest = { showColorPickerDialog = false },
+            title = { Text(t("Choose Background Color", "Выберите цвет фона", currentLang), fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+            text = {
+                Box(modifier = Modifier.fillMaxWidth().height(140.dp)) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(4),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(colorsPreset) { color ->
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(color)
+                                    .clickable {
+                                        wallpaperType = "color"
+                                        wallpaperColor = color.toArgb()
+                                        dataPrefs.edit().putString("wp_type", "color").putInt("wp_color", color.toArgb()).apply()
+                                        showColorPickerDialog = false
+                                    }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showColorPickerDialog = false }) {
+                    Text(t("Cancel", "Отмена", currentLang))
+                }
+            }
+        )
     }
 
     if (showMenuSheet) {
@@ -583,7 +889,6 @@ fun SvinotaBrowser(
 
                     IconButton(
                         onClick = {
-                            // Безопасное закрытие всех WebView перед очисткой списка
                             tabs.forEach { it.webView?.destroy() }
                             val n = Tab()
                             tabs = listOf(n)
@@ -651,7 +956,6 @@ fun SvinotaBrowser(
                                 IconButton(onClick = {
                                     val currentTabs = tabs
                                     if(currentTabs.size > 1) {
-                                        // Безопасный перевод фокуса ДО удаления элемента
                                         if(activeTabId == t.id) {
                                             val remaining = currentTabs.filter { it.id != t.id }
                                             activeTabId = remaining.last().id
@@ -738,7 +1042,11 @@ fun SettingsScreen(
     var customSearchUrl by remember { mutableStateOf(prefs.getString("custom_search", "https://") ?: "https://") }
     var showCustomDialog by remember { mutableStateOf(false) }
 
-    val themeLabels = if (currentLang == "ru") listOf("Светлая", "Светлая (Material)", "Тёмная", "Тёмная (Material)") else listOf("Light", "Light (Material)", "Dark", "Dark (Material)")
+    val themeLabels = if (currentLang == "ru") {
+        listOf("Светлая", "Светлая (Material)", "Тёмная", "Тёмная (Material)", "AMOLED")
+    } else {
+        listOf("Light", "Light (Material)", "Dark", "Dark (Material)", "AMOLED")
+    }
     val langLabels = mapOf("en" to "English", "ru" to "Русский")
 
     var themeExpanded by remember { mutableStateOf(false) }
@@ -760,8 +1068,7 @@ fun SettingsScreen(
                 )
                 Spacer(Modifier.height(16.dp))
                 Text("svinotaBrowser", fontSize = 24.sp, fontFamily = LogoFont)
-                // Обновлено до версии alpha-8
-                Text("Version: alpha-8", fontSize = 14.sp, color = Color.Gray)
+                Text("Version: alpha-9", fontSize = 14.sp, color = Color.Gray)
                 Spacer(Modifier.height(8.dp))
                 Text(t("By SSNDash Team", "Разработчик: SSNDash Team", currentLang), textAlign = TextAlign.Center, fontSize = 14.sp)
 
@@ -813,7 +1120,7 @@ fun SettingsScreen(
                 Box(Modifier.padding(horizontal = 16.dp)) {
                     ExposedDropdownMenuBox(expanded = themeExpanded, onExpandedChange = { themeExpanded = !themeExpanded }) {
                         OutlinedTextField(
-                            value = themeLabels[themeMode], onValueChange = {}, readOnly = true,
+                            value = themeLabels.getOrElse(themeMode) { themeLabels.last() }, onValueChange = {}, readOnly = true,
                             label = { Text(t("Theme", "Тема", currentLang)) },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = themeExpanded) },
                             modifier = Modifier.menuAnchor().fillMaxWidth()
