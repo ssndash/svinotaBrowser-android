@@ -15,8 +15,8 @@ android {
         applicationId = "com.svinota.Browser"
         minSdk = 23
         targetSdk = 36
-        versionCode = 11
-        versionName = "alpha-9"
+        versionCode = 12
+        versionName = "alpha-10"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

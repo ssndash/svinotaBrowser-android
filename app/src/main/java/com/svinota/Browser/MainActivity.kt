@@ -25,8 +25,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.*
@@ -47,6 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -79,13 +82,30 @@ data class Tab(
     val id: Long = System.nanoTime(),
     var url: MutableState<String> = mutableStateOf(""),
     var webView: WebView? = null,
-    var favicon: MutableState<Bitmap?> = mutableStateOf(null)
+    var favicon: MutableState<Bitmap?> = mutableStateOf(null),
+    var isDesktopMode: MutableState<Boolean> = mutableStateOf(false)
 )
 
 @Composable
 fun t(en: String, ru: String, forcedLang: String? = null): String {
     val locale = forcedLang ?: Locale.getDefault().language
     return if (locale == "ru") ru else en
+}
+
+@Composable
+fun MenuIconBtn(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier
+            .clickable { onClick() }
+            .padding(12.dp)
+            .fillMaxWidth()
+    ) {
+        Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(4.dp))
+        Text(label, fontSize = 12.sp, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 class MainActivity : ComponentActivity() {
@@ -100,13 +120,14 @@ class MainActivity : ComponentActivity() {
             var themeMode by remember { mutableIntStateOf(prefs.getInt("theme_mode", 0)) }
             var searchEngine by remember { mutableStateOf(prefs.getString("search_engine", "https://duckduckgo.com/?q=") ?: "https://duckduckgo.com/?q=") }
             var appLang by remember { mutableStateOf(prefs.getString("app_lang", Locale.getDefault().language) ?: "en") }
+            var barPosition by remember { mutableIntStateOf(prefs.getInt("bar_position", 0)) } // 0 = Bottom, 1 = Top
 
             val useDynamicColors = (themeMode == 1 || themeMode == 3) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
             val isDark = themeMode >= 2
 
             val colorScheme = when {
                 themeMode == 4 -> darkColorScheme(
-                    primary = Color(0xFF0076FF),
+                    primary = Color(0xFFB7B7B7),
                     background = Color.Black,
                     surface = Color.Black,
                     surfaceVariant = Color(0xFF121212),
@@ -135,9 +156,11 @@ class MainActivity : ComponentActivity() {
                     themeMode = themeMode,
                     currentSearchEngine = searchEngine,
                     currentLang = appLang,
+                    barPosition = barPosition,
                     onThemeChange = { mode -> themeMode = mode; prefs.edit().putInt("theme_mode", mode).apply() },
                     onSearchEngineChange = { searchEngine = it; prefs.edit().putString("search_engine", it).apply() },
-                    onLangChange = { lang -> appLang = lang; prefs.edit().putString("app_lang", lang).apply() }
+                    onLangChange = { lang -> appLang = lang; prefs.edit().putString("app_lang", lang).apply() },
+                    onBarPositionChange = { pos -> barPosition = pos; prefs.edit().putInt("bar_position", pos).apply() }
                 )
             }
         }
@@ -151,9 +174,11 @@ fun SvinotaBrowser(
     themeMode: Int,
     currentSearchEngine: String,
     currentLang: String,
+    barPosition: Int,
     onThemeChange: (Int) -> Unit,
     onSearchEngineChange: (String) -> Unit,
-    onLangChange: (String) -> Unit
+    onLangChange: (String) -> Unit,
+    onBarPositionChange: (Int) -> Unit
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -271,6 +296,19 @@ fun SvinotaBrowser(
     var newBookmarkName by remember { mutableStateOf("") }
     var newBookmarkUrl by remember { mutableStateOf("") }
 
+    // Логика скрытия навбара при скролле (только если он сверху)
+    var isBarVisible by remember { mutableStateOf(true) }
+    val barTranslationY by animateFloatAsState(
+        targetValue = if (barPosition == 1 && !isBarVisible && activeTab.url.value.isNotEmpty()) -100f else 0f,
+        animationSpec = tween(durationMillis = 250),
+        label = "BarTranslation"
+    )
+
+    // Сбрасываем видимость бара при переключении табов или переходе на главную
+    LaunchedEffect(activeTabId, activeTab.url.value) {
+        isBarVisible = true
+    }
+
     val isDark = themeMode >= 2
     val bgColor = MaterialTheme.colorScheme.surface
     val textColor = MaterialTheme.colorScheme.onSurface
@@ -317,6 +355,7 @@ fun SvinotaBrowser(
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
         ModalNavigationDrawer(
             drawerState = drawerState,
+            gesturesEnabled = drawerState.isOpen,
             drawerContent = {
                 ModalDrawerSheet(
                     drawerShape = RoundedCornerShape(topStart = 0.dp, bottomStart = 16.dp, topEnd = 0.dp, bottomEnd = 0.dp),
@@ -428,280 +467,322 @@ fun SvinotaBrowser(
                 }
             }
         ) {
-            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-                Scaffold { padding ->
-                    Box(
-                        Modifier
-                            .padding(padding)
-                            .fillMaxSize()
-                            .background(
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (drawerState.isOpen) {
+                            Modifier.clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                scope.launch { drawerState.close() }
+                            }
+                        } else Modifier
+                    )
+            ) {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                    Scaffold { padding ->
+                        Box(
+                            Modifier
+                                .padding(padding)
+                                .fillMaxSize()
+                                .background(
+                                    if (activeTab.url.value.isEmpty()) {
+                                        when (wallpaperType) {
+                                            "color" -> Color(wallpaperColor)
+                                            "image" -> Color.Transparent
+                                            else -> MaterialTheme.colorScheme.surface
+                                        }
+                                    } else {
+                                        MaterialTheme.colorScheme.surface
+                                    }
+                                )
+                        ) {
+                            if (activeTab.url.value.isEmpty() && wallpaperType == "image" && wallpaperBitmap != null) {
+                                Image(
+                                    bitmap = wallpaperBitmap.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                            }
+
+                            // КОНТЕНТ СТРАНИЦЫ (Сайт или Главный экран)
+                            Box(modifier = Modifier.fillMaxSize()) {
                                 if (activeTab.url.value.isEmpty()) {
-                                    when (wallpaperType) {
-                                        "color" -> Color(wallpaperColor)
-                                        "image" -> Color.Transparent
-                                        else -> MaterialTheme.colorScheme.surface
-                                    }
-                                } else {
-                                    MaterialTheme.colorScheme.surface
-                                }
-                            )
-                    ) {
-                        if (activeTab.url.value.isEmpty() && wallpaperType == "image" && wallpaperBitmap != null) {
-                            Image(
-                                bitmap = wallpaperBitmap.asImageBitmap(),
-                                contentDescription = null,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
-                        }
-
-                        if (activeTab.url.value.isEmpty()) {
-                            Column(Modifier.fillMaxSize().padding(24.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Image(painter = painterResource(id = R.drawable.icon), contentDescription = null, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(12.dp)))
-                                        Spacer(Modifier.width(12.dp))
-                                        Text(
-                                            "svinotaBrowser",
-                                            fontSize = 28.sp,
-                                            fontFamily = LogoFont,
-                                            color = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.onSurface
-                                        )
-                                    }
-
-                                    IconButton(
-                                        onClick = { scope.launch { drawerState.open() } },
-                                        colors = IconButtonDefaults.iconButtonColors(
-                                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.0f),
-                                            contentColor = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.primary
-                                        )
+                                    // Главная страница: если бар сверху, делаем отступ, чтобы логотип и закладки съехали ниже
+                                    Column(
+                                        Modifier
+                                            .fillMaxSize()
+                                            .padding(24.dp)
+                                            .padding(top = if (barPosition == 1) 80.dp else 0.dp)
                                     ) {
-                                        Icon(Icons.Default.Edit, contentDescription = "Wallpaper settings")
-                                    }
-                                }
-                                Spacer(Modifier.height(40.dp))
-
-                                if (showBookmarksHome) {
-                                    LazyVerticalGrid(
-                                        columns = GridCells.Fixed(4),
-                                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                                    ) {
-                                        item {
-                                            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
-                                                activeTab.url.value = "https://ssndash.ru"
-                                                saveTabsState()
-                                            }) {
-                                                Image(painter = painterResource(id = R.drawable.ssndash), contentDescription = null, modifier = Modifier.size(56.dp).clip(RoundedCornerShape(12.dp)))
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Image(painter = painterResource(id = R.drawable.icon), contentDescription = null, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(12.dp)))
+                                                Spacer(Modifier.width(12.dp))
                                                 Text(
-                                                    "SSNDash",
-                                                    fontSize = 11.sp,
-                                                    modifier = Modifier.padding(top = 4.dp),
-                                                    maxLines = 1,
+                                                    "svinotaBrowser",
+                                                    fontSize = 28.sp,
+                                                    fontFamily = LogoFont,
                                                     color = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.onSurface
                                                 )
                                             }
+
+                                            IconButton(
+                                                onClick = { scope.launch { drawerState.open() } },
+                                                colors = IconButtonDefaults.iconButtonColors(
+                                                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.0f),
+                                                    contentColor = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.primary
+                                                )
+                                            ) {
+                                                Icon(Icons.Default.Edit, contentDescription = "Wallpaper settings")
+                                            }
                                         }
-                                        items(bookmarks) { bookmarkData ->
-                                            val parts = bookmarkData.split("|||")
-                                            val bName = parts.getOrNull(0) ?: ""
-                                            val bUrl = parts.getOrNull(1) ?: bookmarkData
-                                            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
-                                                activeTab.url.value = bUrl
-                                                saveTabsState()
-                                            }) {
-                                                Surface(Modifier.size(56.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-                                                    Box(contentAlignment = Alignment.Center) {
-                                                        Icon(Icons.Filled.Star, null, tint = MaterialTheme.colorScheme.primary)
+                                        Spacer(Modifier.height(40.dp))
+
+                                        if (showBookmarksHome) {
+                                            LazyVerticalGrid(
+                                                columns = GridCells.Fixed(4),
+                                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                                            ) {
+                                                item {
+                                                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
+                                                        activeTab.url.value = "https://ssndash.ru"
+                                                        saveTabsState()
+                                                    }) {
+                                                        Image(painter = painterResource(id = R.drawable.ssndash), contentDescription = null, modifier = Modifier.size(56.dp).clip(RoundedCornerShape(12.dp)))
+                                                        Text(
+                                                            "SSNDash",
+                                                            fontSize = 11.sp,
+                                                            modifier = Modifier.padding(top = 4.dp),
+                                                            maxLines = 1,
+                                                            color = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.onSurface
+                                                        )
                                                     }
                                                 }
-                                                Text(
-                                                    bName.ifBlank { bUrl.removePrefix("https://").removePrefix("http://").split("/")[0] },
-                                                    fontSize = 11.sp,
-                                                    modifier = Modifier.padding(top = 4.dp),
-                                                    maxLines = 1,
-                                                    color = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.onSurface
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            Box(Modifier.fillMaxSize()) {
-                                tabs.forEach { tab ->
-                                    val isCurrent = tab.id == activeTabId
-
-                                    AndroidView(
-                                        factory = { ctx ->
-                                            WebView(ctx).apply {
-                                                webViewClient = object : WebViewClient() {
-                                                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                                        if (url != null && !url.startsWith("data:") && url != "about:blank") {
-                                                            tab.url.value = url
-                                                            saveTabsState()
-                                                        }
-                                                    }
-                                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                                        if (url != null && !url.startsWith("data:") && url != "about:blank") {
-                                                            tab.url.value = url
-                                                            saveTabsState()
-                                                            val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
-                                                            if (!currentHistory.contains(url)) {
-                                                                val updatedHistory = (currentHistory + url).takeLast(50).distinct()
-                                                                history = updatedHistory
-                                                                dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
+                                                items(bookmarks) { bookmarkData ->
+                                                    val parts = bookmarkData.split("|||")
+                                                    val bName = parts.getOrNull(0) ?: ""
+                                                    val bUrl = parts.getOrNull(1) ?: bookmarkData
+                                                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable {
+                                                        activeTab.url.value = bUrl
+                                                        saveTabsState()
+                                                    }) {
+                                                        Surface(Modifier.size(56.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+                                                            Box(contentAlignment = Alignment.Center) {
+                                                                Icon(Icons.Filled.Star, null, tint = MaterialTheme.colorScheme.primary)
                                                             }
                                                         }
-                                                    }
-                                                    override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                                                        val names = listOf("tvrshk", "KS51", "guganator3000", "Letexe", "michael dodo pizza", "Timofya453")
-                                                        val bgHex = String.format("#%06X", (0xFFFFFF and bgColor.toArgb()))
-                                                        val textHex = String.format("#%06X", (0xFFFFFF and textColor.toArgb()))
-
-                                                        val errorHtml = """
-                                                            <html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
-                                                                body { background-color: $bgHex; color: $textHex; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; text-align: center; margin: 0; }
-                                                                h1 { color: #0077ff; }
-                                                                button { padding: 12px 24px; border-radius: 20px; border: none; background: #0077ff; color: white; font-weight: bold; margin-top: 20px; }
-                                                            </style></head><body>
-                                                                <h1>$errorTitle</h1>
-                                                                <p>${names.random()} $errorMsg</p>
-                                                                <button onclick="location.reload()">$retryBtn</button>
-                                                            </body></html>
-                                                        """.trimIndent()
-                                                        view?.loadDataWithBaseURL(null, errorHtml, "text/html", "UTF-8", null)
+                                                        Text(
+                                                            bName.ifBlank { bUrl.removePrefix("https://").removePrefix("http://").split("/")[0] },
+                                                            fontSize = 11.sp,
+                                                            modifier = Modifier.padding(top = 4.dp),
+                                                            maxLines = 1,
+                                                            color = if (wallpaperType != "default") Color.White else MaterialTheme.colorScheme.onSurface
+                                                        )
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Box(Modifier.fillMaxSize()) {
+                                        tabs.forEach { tab ->
+                                            val isCurrent = tab.id == activeTabId
 
-                                                webChromeClient = object : WebChromeClient() {
-                                                    override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
-                                                        super.onReceivedIcon(view, icon)
-                                                        if (icon != null) {
-                                                            tab.favicon.value = icon
+                                            AndroidView(
+                                                factory = { ctx ->
+                                                    WebView(ctx).apply {
+                                                        webViewClient = object : WebViewClient() {
+                                                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                                                if (url != null && !url.startsWith("data:") && url != "about:blank") {
+                                                                    tab.url.value = url
+                                                                    saveTabsState()
+                                                                }
+                                                            }
+                                                            override fun onPageFinished(view: WebView?, url: String?) {
+                                                                if (url != null && !url.startsWith("data:") && url != "about:blank") {
+                                                                    tab.url.value = url
+                                                                    saveTabsState()
+                                                                    val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
+                                                                    if (!currentHistory.contains(url)) {
+                                                                        val updatedHistory = (currentHistory + url).takeLast(50).distinct()
+                                                                        history = updatedHistory
+                                                                        dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
+                                                                    }
+                                                                }
+                                                            }
+                                                            override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                                                                val names = listOf("tvrshk", "KS51", "guganator3000", "Letexe", "michael dodo pizza", "Timofya453")
+                                                                val bgHex = String.format("#%06X", (0xFFFFFF and bgColor.toArgb()))
+                                                                val textHex = String.format("#%06X", (0xFFFFFF and textColor.toArgb()))
+
+                                                                val errorHtml = """
+                                                                    <html><head><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
+                                                                        body { background-color: $bgHex; color: $textHex; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; text-align: center; margin: 0; }
+                                                                        h1 { color: #0077ff; }
+                                                                        button { padding: 12px 24px; border-radius: 20px; border: none; background: #0077ff; color: white; font-weight: bold; margin-top: 20px; }
+                                                                    </style></head><body>
+                                                                        <h1>$errorTitle</h1>
+                                                                        <p>${names.random()} $errorMsg</p>
+                                                                        <button onclick="location.reload()">$retryBtn</button>
+                                                                    </body></html>
+                                                                """.trimIndent()
+                                                                view?.loadDataWithBaseURL(null, errorHtml, "text/html", "UTF-8", null)
+                                                            }
+                                                        }
+
+                                                        webChromeClient = object : WebChromeClient() {
+                                                            override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
+                                                                super.onReceivedIcon(view, icon)
+                                                                if (icon != null) {
+                                                                    tab.favicon.value = icon
+                                                                }
+                                                            }
+                                                        }
+
+                                                        setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
+                                                            try {
+                                                                val request = DownloadManager.Request(Uri.parse(url))
+                                                                val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                                                                request.setMimeType(mimetype)
+                                                                request.addRequestHeader("cookie", CookieManager.getInstance().getCookie(url))
+                                                                request.addRequestHeader("User-Agent", userAgent)
+                                                                request.setTitle(fileName)
+                                                                request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                                                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                                                                (ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+                                                                Toast.makeText(ctx, "Download started", Toast.LENGTH_SHORT).show()
+                                                            } catch (e: Exception) {
+                                                                Toast.makeText(ctx, "Download failed", Toast.LENGTH_SHORT).show()
+                                                            }
+                                                        }
+
+                                                        settings.javaScriptEnabled = true
+                                                        settings.domStorageEnabled = true
+                                                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+
+                                                        // Слушатель скролла для скрытия/показа верхнего навбара
+                                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                                            setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
+                                                                if (barPosition == 1) {
+                                                                    if (scrollY > oldScrollY && scrollY > 20) {
+                                                                        isBarVisible = false // Скролл вниз -> прячем
+                                                                    } else if (scrollY < oldScrollY) {
+                                                                        isBarVisible = true  // Скролл вверх -> показываем
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                                                            WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, isDark)
+                                                        }
+                                                        tab.webView = this
+                                                        if (tab.url.value.isNotEmpty()) {
+                                                            loadUrl(tab.url.value)
                                                         }
                                                     }
-                                                }
-
-                                                setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
-                                                    try {
-                                                        val request = DownloadManager.Request(Uri.parse(url))
-                                                        val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                                                        request.setMimeType(mimetype)
-                                                        request.addRequestHeader("cookie", CookieManager.getInstance().getCookie(url))
-                                                        request.addRequestHeader("User-Agent", userAgent)
-                                                        request.setTitle(fileName)
-                                                        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                                        request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                                                        (ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-                                                        Toast.makeText(ctx, "Download started", Toast.LENGTH_SHORT).show()
-                                                    } catch (e: Exception) {
-                                                        Toast.makeText(ctx, "Download failed", Toast.LENGTH_SHORT).show()
+                                                },
+                                                update = { webView ->
+                                                    if (tab.url.value.isNotEmpty() && webView.url != tab.url.value) {
+                                                        webView.loadUrl(tab.url.value)
                                                     }
-                                                }
-
-                                                settings.javaScriptEnabled = true
-                                                settings.domStorageEnabled = true
-                                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-
-                                                if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-                                                    WebSettingsCompat.setAlgorithmicDarkeningAllowed(settings, isDark)
-                                                }
-                                                tab.webView = this
-                                                if (tab.url.value.isNotEmpty()) {
-                                                    loadUrl(tab.url.value)
-                                                }
-                                            }
-                                        },
-                                        update = { webView ->
-                                            if (tab.url.value.isNotEmpty() && webView.url != tab.url.value) {
-                                                webView.loadUrl(tab.url.value)
-                                            }
-                                            if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
-                                                WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDark)
-                                            }
-                                            if (isCurrent) {
-                                                webView.requestFocus()
-                                            } else {
-                                                webView.clearFocus()
-                                            }
-                                        },
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .alpha(if (isCurrent) 1f else 0.01f)
-                                    )
-                                }
-                            }
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(16.dp)
-                                .fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Surface(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(64.dp)
-                                    .clip(RoundedCornerShape(45.dp)),
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                                tonalElevation = 8.dp
-                            ) {
-                                Row(Modifier.fillMaxSize().padding(start = 8.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    TextField(
-                                        value = inputUrl, onValueChange = { inputUrl = it }, modifier = Modifier.weight(1f),
-                                        leadingIcon = { Icon(Icons.Default.Search, null) },
-                                        trailingIcon = {
-                                            if (activeTab.url.value.isNotEmpty()) {
-                                                IconButton(onClick = { activeTab.webView?.reload() }) {
-                                                    Icon(Icons.Default.Refresh, null)
-                                                }
-                                            }
-                                        },
-                                        placeholder = { Text(t("Search...", "Поиск...", currentLang)) },
-                                        singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                        keyboardActions = KeyboardActions(onSearch = {
-                                            if (inputUrl.isNotBlank()) {
-                                                val trimmed = inputUrl.trim()
-                                                val formatted = if (trimmed.matches("^(https?://)?([\\w-]+\\.)+[\\w-]{2,}(/.*)?$".toRegex()) && !trimmed.contains(" ")) {
-                                                    if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
-                                                } else { "$currentSearchEngine$trimmed" }
-                                                activeTab.url.value = formatted
-                                                saveTabsState()
-                                                val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
-                                                val updatedHistory = (currentHistory + formatted).takeLast(50).distinct()
-                                                history = updatedHistory
-                                                dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
-                                                focusManager.clearFocus()
-                                            }
-                                        }),
-                                        colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent)
-                                    )
-                                    IconButton(onClick = { showTabsSheet = true }) {
-                                        Box(Modifier.size(24.dp).border(1.5.dp, MaterialTheme.colorScheme.onSurfaceVariant, RoundedCornerShape(4.dp)), contentAlignment = Alignment.Center) {
-                                            Text(tabs.size.toString(), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                                    if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+                                                        WebSettingsCompat.setAlgorithmicDarkeningAllowed(webView.settings, isDark)
+                                                    }
+                                                    if (isCurrent) {
+                                                        webView.requestFocus()
+                                                    } else {
+                                                        webView.clearFocus()
+                                                    }
+                                                },
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .alpha(if (isCurrent) 1f else 0.01f)
+                                            )
                                         }
                                     }
                                 }
                             }
 
-                            Spacer(Modifier.width(8.dp))
-
-                            Surface(
-                                onClick = { showMenuSheet = true },
-                                modifier = Modifier.size(64.dp),
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                                tonalElevation = 8.dp
+                            // НАВЕРХНУТЫЙ НАВБАР (Перекрывает всё поверх, без подложки самого ряда)
+                            Row(
+                                modifier = Modifier
+                                    .align(if (barPosition == 1) Alignment.TopCenter else Alignment.BottomCenter)
+                                    .graphicsLayer {
+                                        // Применяем смещение по оси Y для анимации скрытия (умножаем на плотность пикселей)
+                                        translationY = barTranslationY * density
+                                    }
+                                    .padding(16.dp)
+                                    .fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Default.Menu, null)
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(64.dp)
+                                        .clip(RoundedCornerShape(45.dp)),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    tonalElevation = 8.dp
+                                ) {
+                                    Row(Modifier.fillMaxSize().padding(start = 8.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        TextField(
+                                            value = inputUrl, onValueChange = { inputUrl = it }, modifier = Modifier.weight(1f),
+                                            leadingIcon = { Icon(Icons.Default.Search, null) },
+                                            trailingIcon = {
+                                                if (activeTab.url.value.isNotEmpty()) {
+                                                    IconButton(onClick = { activeTab.webView?.reload() }) {
+                                                        Icon(Icons.Default.Refresh, null)
+                                                    }
+                                                }
+                                            },
+                                            placeholder = { Text(t("Search...", "Поиск...", currentLang)) },
+                                            singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                            keyboardActions = KeyboardActions(onSearch = {
+                                                if (inputUrl.isNotBlank()) {
+                                                    val trimmed = inputUrl.trim()
+                                                    val formatted = if (trimmed.matches("^(https?://)?([\\w-]+\\.)+[\\w-]{2,}(/.*)?$".toRegex()) && !trimmed.contains(" ")) {
+                                                        if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
+                                                    } else { "$currentSearchEngine$trimmed" }
+                                                    activeTab.url.value = formatted
+                                                    saveTabsState()
+                                                    val currentHistory = dataPrefs.getStringSet("history", emptySet())?.toList() ?: emptyList()
+                                                    val updatedHistory = (currentHistory + formatted).takeLast(50).distinct()
+                                                    history = updatedHistory
+                                                    dataPrefs.edit().putStringSet("history", updatedHistory.toSet()).apply()
+                                                    focusManager.clearFocus()
+                                                }
+                                            }),
+                                            colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent)
+                                        )
+                                        IconButton(onClick = { showTabsSheet = true }) {
+                                            Box(Modifier.size(24.dp).border(1.5.dp, MaterialTheme.colorScheme.onSurfaceVariant, RoundedCornerShape(4.dp)), contentAlignment = Alignment.Center) {
+                                                Text(tabs.size.toString(), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(Modifier.width(8.dp))
+
+                                Surface(
+                                    onClick = { showMenuSheet = true },
+                                    modifier = Modifier.size(64.dp),
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    tonalElevation = 8.dp
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(Icons.Default.Menu, null)
+                                    }
                                 }
                             }
                         }
@@ -720,9 +801,11 @@ fun SvinotaBrowser(
             themeMode = themeMode,
             currentSearchEngine = currentSearchEngine,
             currentLang = currentLang,
+            barPosition = barPosition,
             onThemeChange = onThemeChange,
             onSearchEngineChange = onSearchEngineChange,
-            onLangChange = onLangChange
+            onLangChange = onLangChange,
+            onBarPositionChange = onBarPositionChange
         ) { showFullSettings = false }
     }
 
@@ -789,9 +872,46 @@ fun SvinotaBrowser(
                             }
                         }
                         Spacer(Modifier.height(8.dp))
+
+                        if (activeTab.url.value.isNotEmpty()) {
+                            Surface(
+                                onClick = {
+                                    activeTab.webView?.let { webView ->
+                                        val desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                                        if (!activeTab.isDesktopMode.value) {
+                                            webView.settings.userAgentString = desktopUA
+                                            webView.settings.useWideViewPort = true
+                                            webView.settings.loadWithOverviewMode = true
+                                            activeTab.isDesktopMode.value = true
+                                        } else {
+                                            webView.settings.userAgentString = null
+                                            webView.settings.useWideViewPort = false
+                                            webView.settings.loadWithOverviewMode = false
+                                            activeTab.isDesktopMode.value = false
+                                        }
+                                        webView.reload()
+                                    }
+                                    showMenuSheet = false
+                                },
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(painter = painterResource(id = R.drawable.computer), null, tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(
+                                        text = t("Desktop site", "Версия для ПК", currentLang),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(8.dp))
+                        }
+
                         Surface(onClick = { showMenuSheet = false; showFullSettings = true }, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
                             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Settings, null)
+                                Icon(Icons.Default.Settings, null, tint = MaterialTheme.colorScheme.primary)
                                 Spacer(Modifier.width(12.dp))
                                 Text(t("Settings", "Настройки", currentLang), fontWeight = FontWeight.Bold)
                             }
@@ -1013,28 +1133,17 @@ fun SvinotaBrowser(
     }
 }
 
-@Composable
-fun MenuIconBtn(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-        modifier = Modifier.clickable { onClick() }.padding(12.dp).fillMaxWidth()
-    ) {
-        Icon(icon, null)
-        Spacer(Modifier.height(4.dp))
-        Text(label, fontSize = 12.sp, textAlign = TextAlign.Center)
-    }
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     themeMode: Int,
     currentSearchEngine: String,
     currentLang: String,
+    barPosition: Int,
     onThemeChange: (Int) -> Unit,
     onSearchEngineChange: (String) -> Unit,
     onLangChange: (String) -> Unit,
+    onBarPositionChange: (Int) -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -1047,10 +1156,18 @@ fun SettingsScreen(
     } else {
         listOf("Light", "Light (Material)", "Dark", "Dark (Material)", "AMOLED")
     }
+
+    val barLabels = if (currentLang == "ru") {
+        listOf("Снизу", "Сверху")
+    } else {
+        listOf("Bottom", "Top")
+    }
+
     val langLabels = mapOf("en" to "English", "ru" to "Русский")
 
     var themeExpanded by remember { mutableStateOf(false) }
     var langExpanded by remember { mutableStateOf(false) }
+    var barExpanded by remember { mutableStateOf(false) }
     var showAboutPage by remember { mutableStateOf(false) }
 
     if (showAboutPage) {
@@ -1068,7 +1185,7 @@ fun SettingsScreen(
                 )
                 Spacer(Modifier.height(16.dp))
                 Text("svinotaBrowser", fontSize = 24.sp, fontFamily = LogoFont)
-                Text("Version: alpha-9", fontSize = 14.sp, color = Color.Gray)
+                Text("Version: alpha-10", fontSize = 14.sp, color = Color.Gray)
                 Spacer(Modifier.height(8.dp))
                 Text(t("By SSNDash Team", "Разработчик: SSNDash Team", currentLang), textAlign = TextAlign.Center, fontSize = 14.sp)
 
@@ -1123,6 +1240,7 @@ fun SettingsScreen(
                             value = themeLabels.getOrElse(themeMode) { themeLabels.last() }, onValueChange = {}, readOnly = true,
                             label = { Text(t("Theme", "Тема", currentLang)) },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = themeExpanded) },
+                            shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.menuAnchor().fillMaxWidth()
                         )
                         ExposedDropdownMenu(expanded = themeExpanded, onDismissRequest = { themeExpanded = false }) {
@@ -1133,12 +1251,33 @@ fun SettingsScreen(
                     }
                 }
                 Spacer(Modifier.height(16.dp))
+
+                // ВЫБОР ПОЛОЖЕНИЯ НАВБАРA
+                Box(Modifier.padding(horizontal = 16.dp)) {
+                    ExposedDropdownMenuBox(expanded = barExpanded, onExpandedChange = { barExpanded = !barExpanded }) {
+                        OutlinedTextField(
+                            value = barLabels.getOrElse(barPosition) { barLabels.first() }, onValueChange = {}, readOnly = true,
+                            label = { Text(t("Navigation bar position", "Положение нав. бара", currentLang)) },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = barExpanded) },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.menuAnchor().fillMaxWidth()
+                        )
+                        ExposedDropdownMenu(expanded = barExpanded, onDismissRequest = { barExpanded = false }) {
+                            barLabels.forEachIndexed { index, label ->
+                                DropdownMenuItem(text = { Text(label) }, onClick = { onBarPositionChange(index); barExpanded = false })
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+
                 Box(Modifier.padding(horizontal = 16.dp)) {
                     ExposedDropdownMenuBox(expanded = langExpanded, onExpandedChange = { langExpanded = !langExpanded }) {
                         OutlinedTextField(
                             value = langLabels[currentLang] ?: "English", onValueChange = {}, readOnly = true,
                             label = { Text(t("Language", "Язык", currentLang)) },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = langExpanded) },
+                            shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.menuAnchor().fillMaxWidth()
                         )
                         ExposedDropdownMenu(expanded = langExpanded, onDismissRequest = { langExpanded = false }) {
